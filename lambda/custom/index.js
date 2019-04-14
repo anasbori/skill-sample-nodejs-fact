@@ -1,31 +1,175 @@
-// Alexa Fact Skill - Sample for Beginners
-/* eslint no-use-before-define: 0 */
-// sets up dependencies
-const Alexa = require('ask-sdk-core');
-const i18n = require('i18next');
-const sprintf = require('i18next-sprintf-postprocessor');
+/* eslint-disable  func-names */
+/* eslint-disable  no-restricted-syntax */
+/* eslint-disable  no-loop-func */
+/* eslint-disable  consistent-return */
+/* eslint-disable  no-console */
+/* eslint-disable max-len */
+/* eslint-disable prefer-destructuring */
 
-// core functionality for fact skill
-const GetNewFactHandler = {
+const Alexa = require('ask-sdk-core');
+const https = require('https');
+
+/* INTENT HANDLERS */
+
+const LaunchRequestHandler = {
   canHandle(handlerInput) {
-    const request = handlerInput.requestEnvelope.request;
-    // checks request type
-    return request.type === 'LaunchRequest'
-      || (request.type === 'IntentRequest'
-        && request.intent.name === 'GetNewFactIntent');
+    return handlerInput.requestEnvelope.request.type === 'LaunchRequest';
   },
   handle(handlerInput) {
-    const requestAttributes = handlerInput.attributesManager.getRequestAttributes();
-    // gets a random fact by assigning an array to the variable
-    // the random item from the array will be selected by the i18next library
-    // the i18next library is set up in the Request Interceptor
-    const randomFact = requestAttributes.t('FACTS');
-    // concatenates a standard message with the random fact
-    const speakOutput = requestAttributes.t('GET_FACT_MESSAGE') + randomFact;
+    return handlerInput.responseBuilder
+      .speak('Welcome to pet match. I can help you find the best dog for you. ' +
+        'What are two things you are looking for in a dog?')
+      .reprompt('What size and temperament are you looking for in a dog?')
+      .getResponse();
+  },
+};
+
+const MythicalCreaturesHandler = {
+  canHandle(handlerInput) {
+    if (handlerInput.requestEnvelope.request.type !== 'IntentRequest'
+      || handlerInput.requestEnvelope.request.intent.name !== 'PetMatchIntent') {
+      return false;
+    }
+
+    let isMythicalCreatures = false;
+    if (handlerInput.requestEnvelope.request.intent.slots.pet
+      && handlerInput.requestEnvelope.request.intent.slots.pet.resolutions
+      && handlerInput.requestEnvelope.request.intent.slots.pet.resolutions.resolutionsPerAuthority[0]
+      && handlerInput.requestEnvelope.request.intent.slots.pet.resolutions.resolutionsPerAuthority[0].values
+      && handlerInput.requestEnvelope.request.intent.slots.pet.resolutions.resolutionsPerAuthority[0].values[0]
+      && handlerInput.requestEnvelope.request.intent.slots.pet.resolutions.resolutionsPerAuthority[0].values[0].value
+      && handlerInput.requestEnvelope.request.intent.slots.pet.resolutions.resolutionsPerAuthority[0].values[0].value.name === 'mythical_creatures') {
+      const attributesManager = handlerInput.attributesManager;
+      const sessionAttributes = attributesManager.getSessionAttributes();
+      sessionAttributes.mythicalCreature = handlerInput.requestEnvelope.request.intent.slots.pet.value;
+      attributesManager.setSessionAttributes(sessionAttributes);
+      isMythicalCreatures = true;
+    }
+
+    return isMythicalCreatures;
+  },
+  handle(handlerInput) {
+    const attributesManager = handlerInput.attributesManager;
+    const sessionAttributes = attributesManager.getSessionAttributes();
+
+    const outputSpeech = randomPhrase(slotsMeta.pet.invalid_responses).replace('{0}', sessionAttributes.mythicalCreature);
 
     return handlerInput.responseBuilder
-      .speak(speakOutput)
-      .withSimpleCard(requestAttributes.t('SKILL_NAME'), randomFact)
+      .speak(outputSpeech)
+      .getResponse();
+  },
+};
+
+const InProgressPetMatchIntent = {
+  canHandle(handlerInput) {
+    const request = handlerInput.requestEnvelope.request;
+
+    return request.type === 'IntentRequest'
+      && request.intent.name === 'PetMatchIntent'
+      && request.dialogState !== 'COMPLETED';
+  },
+  handle(handlerInput) {
+    const currentIntent = handlerInput.requestEnvelope.request.intent;
+    let prompt = '';
+
+    for (const slotName in currentIntent.slots) {
+      if (Object.prototype.hasOwnProperty.call(currentIntent.slots, slotName)) {
+        const currentSlot = currentIntent.slots[slotName];
+        if (currentSlot.confirmationStatus !== 'CONFIRMED'
+          && currentSlot.resolutions
+          && currentSlot.resolutions.resolutionsPerAuthority[0]) {
+          if (currentSlot.resolutions.resolutionsPerAuthority[0].status.code === 'ER_SUCCESS_MATCH') {
+            if (currentSlot.resolutions.resolutionsPerAuthority[0].values.length > 1) {
+              prompt = 'Which would you like';
+              const size = currentSlot.resolutions.resolutionsPerAuthority[0].values.length;
+
+              currentSlot.resolutions.resolutionsPerAuthority[0].values
+                .forEach((element, index) => {
+                  prompt += ` ${(index === size - 1) ? ' or' : ' '} ${element.value.name}`;
+                });
+
+              prompt += '?';
+
+              return handlerInput.responseBuilder
+                .speak(prompt)
+                .reprompt(prompt)
+                .addElicitSlotDirective(currentSlot.name)
+                .getResponse();
+            }
+          } else if (currentSlot.resolutions.resolutionsPerAuthority[0].status.code === 'ER_SUCCESS_NO_MATCH') {
+            if (requiredSlots.indexOf(currentSlot.name) > -1) {
+              prompt = `What ${currentSlot.name} are you looking for`;
+
+              return handlerInput.responseBuilder
+                .speak(prompt)
+                .reprompt(prompt)
+                .addElicitSlotDirective(currentSlot.name)
+                .getResponse();
+            }
+          }
+        }
+      }
+    }
+
+    return handlerInput.responseBuilder
+      .addDelegateDirective(currentIntent)
+      .getResponse();
+  },
+};
+
+const CompletedPetMatchIntent = {
+  canHandle(handlerInput) {
+    const request = handlerInput.requestEnvelope.request;
+
+    return request.type === 'IntentRequest'
+      && request.intent.name === 'PetMatchIntent'
+      && request.dialogState === 'COMPLETED';
+  },
+  async handle(handlerInput) {
+    const filledSlots = handlerInput.requestEnvelope.request.intent.slots;
+
+    const slotValues = getSlotValues(filledSlots);
+    const petMatchOptions = buildPetMatchOptions(slotValues);
+
+    let outputSpeech = '';
+
+    try {
+      const response = await httpGet(petMatchOptions);
+
+      if (response.result.length > 0) {
+        outputSpeech = `So a ${slotValues.size.resolved} 
+          ${slotValues.temperament.resolved} 
+          ${slotValues.energy.resolved} 
+          energy dog sounds good for you. Consider a 
+          ${response.result[0].breed}`;
+      } else {
+        outputSpeech = `I am sorry I could not find a match 
+          for a ${slotValues.size.resolved} 
+          ${slotValues.temperament.resolved} 
+          ${slotValues.energy.resolved} dog`;
+      }
+    } catch (error) {
+      outputSpeech = 'I am really sorry. I am unable to access part of my memory. Please try again later';
+      console.log(`Intent: ${handlerInput.requestEnvelope.request.intent.name}: message: ${error.message}`);
+    }
+
+    return handlerInput.responseBuilder
+      .speak(outputSpeech)
+      .getResponse();
+  },
+};
+
+const FallbackHandler = {
+  canHandle(handlerInput) {
+    return handlerInput.requestEnvelope.request.type === 'IntentRequest'
+      && handlerInput.requestEnvelope.request.intent.name === 'AMAZON.FallbackIntent';
+  },
+  handle(handlerInput) {
+    return handlerInput.responseBuilder
+      .speak('I\'m sorry Pet Match can\'t help you with that. ' +
+        'I can help find the perfect dog for you. What are two things you\'re ' +
+        'looking for in a dog?')
+      .reprompt('What size and temperament are you looking for?')
       .getResponse();
   },
 };
@@ -33,32 +177,14 @@ const GetNewFactHandler = {
 const HelpHandler = {
   canHandle(handlerInput) {
     const request = handlerInput.requestEnvelope.request;
+
     return request.type === 'IntentRequest'
       && request.intent.name === 'AMAZON.HelpIntent';
   },
   handle(handlerInput) {
-    const requestAttributes = handlerInput.attributesManager.getRequestAttributes();
     return handlerInput.responseBuilder
-      .speak(requestAttributes.t('HELP_MESSAGE'))
-      .reprompt(requestAttributes.t('HELP_REPROMPT'))
-      .getResponse();
-  },
-};
-
-const FallbackHandler = {
-  // 2018-Aug-01: AMAZON.FallbackIntent is only currently available in en-* locales.
-  //              This handler will not be triggered except in those locales, so it can be
-  //              safely deployed for any locale.
-  canHandle(handlerInput) {
-    const request = handlerInput.requestEnvelope.request;
-    return request.type === 'IntentRequest'
-      && request.intent.name === 'AMAZON.FallbackIntent';
-  },
-  handle(handlerInput) {
-    const requestAttributes = handlerInput.attributesManager.getRequestAttributes();
-    return handlerInput.responseBuilder
-      .speak(requestAttributes.t('FALLBACK_MESSAGE'))
-      .reprompt(requestAttributes.t('FALLBACK_REPROMPT'))
+      .speak('This is pet match. I can help you find the perfect pet for you. You can say, I want a dog.')
+      .reprompt('What size and temperament are you looking for in a dog?')
       .getResponse();
   },
 };
@@ -66,25 +192,25 @@ const FallbackHandler = {
 const ExitHandler = {
   canHandle(handlerInput) {
     const request = handlerInput.requestEnvelope.request;
+
     return request.type === 'IntentRequest'
       && (request.intent.name === 'AMAZON.CancelIntent'
         || request.intent.name === 'AMAZON.StopIntent');
   },
   handle(handlerInput) {
-    const requestAttributes = handlerInput.attributesManager.getRequestAttributes();
     return handlerInput.responseBuilder
-      .speak(requestAttributes.t('STOP_MESSAGE'))
+      .speak('Bye')
       .getResponse();
   },
 };
 
 const SessionEndedRequestHandler = {
   canHandle(handlerInput) {
-    const request = handlerInput.requestEnvelope.request;
-    return request.type === 'SessionEndedRequest';
+    return handlerInput.requestEnvelope.request.type === 'SessionEndedRequest';
   },
   handle(handlerInput) {
     console.log(`Session ended with reason: ${handlerInput.requestEnvelope.request.reason}`);
+
     return handlerInput.responseBuilder.getResponse();
   },
 };
@@ -94,307 +220,183 @@ const ErrorHandler = {
     return true;
   },
   handle(handlerInput, error) {
-    console.log(`Error handled: ${error.message}`);
-    console.log(`Error stack: ${error.stack}`);
-    const requestAttributes = handlerInput.attributesManager.getRequestAttributes();
+    console.log(`Error handled: ${handlerInput.requestEnvelope.request.type} ${handlerInput.requestEnvelope.request.type === 'IntentRequest' ? `intent: ${handlerInput.requestEnvelope.request.intent.name} ` : ''}${error.message}.`);
+
     return handlerInput.responseBuilder
-      .speak(requestAttributes.t('ERROR_MESSAGE'))
-      .reprompt(requestAttributes.t('ERROR_MESSAGE'))
+      .speak('Sorry, I can\'t understand the command. Please say again.')
+      .reprompt('Sorry, I can\'t understand the command. Please say again.')
       .getResponse();
   },
 };
 
-const LocalizationInterceptor = {
-  process(handlerInput) {
-    // Gets the locale from the request and initializes 
-    // i18next.
-    const localizationClient = i18n.use(sprintf).init({
-      lng: handlerInput.requestEnvelope.request.locale,
-      resources: languageStrings,
-    });
-    // Creates a localize function to support arguments.
-    localizationClient.localize = function localize() {
-      // gets arguments through and passes them to
-      // i18next using sprintf to replace string placeholders
-      // with arguments.
-      const args = arguments;
-      const values = [];
-      for (let i = 1; i < args.length; i += 1) {
-        values.push(args[i]);
-      }
-      const value = i18n.t(args[0], {
-        returnObjects: true,
-        postProcess: 'sprintf',
-        sprintf: values,
-      });
 
-      // If an array is used then a random value is selected 
-      if (Array.isArray(value)) {
-        return value[Math.floor(Math.random() * value.length)];
-      }
-      return value;
-    };
-    // this gets the request attributes and save the localize function inside 
-    // it to be used in a handler by calling requestAttributes.t(STRING_ID, [args...])
-    const attributes = handlerInput.attributesManager.getRequestAttributes();
-    attributes.t = function translate(...args) {
-      return localizationClient.localize(...args);
-    };
+/* CONSTANTS */
+
+const petMatchApi = {
+  hostname: 'e4v7rdwl7l.execute-api.us-east-1.amazonaws.com',
+  pets: '/Test',
+};
+
+const requiredSlots = [
+  'energy',
+  'size',
+  'temperament',
+];
+
+const slotsMeta = {
+  pet: {
+    invalid_responses: [
+      "I'm sorry, but I'm not qualified to match you with {0}s.",
+      'Ah yes, {0}s are splendid creatures, but unfortunately owning one as a pet is outlawed.',
+      "I'm sorry I can't match you with {0}s.",
+    ],
+    error_default: "I'm sorry I can't match you with {0}s.",
   },
 };
+
+/* HELPER FUNCTIONS */
+
+function buildPastMatchObject(response, slotValues) {
+  return {
+    match: response.result,
+    pet: slotValues.pet.resolved,
+    energy: slotValues.energy.resolved,
+    size: slotValues.size.resolved,
+    temperament: slotValues.temperament.resolved,
+  };
+}
+
+function saveValue(options, handlerInput) {
+  const key = `_${options.fieldName}`;
+  const attributes = handlerInput.attributesManager.getSessionAttributes();
+
+  if (options.append && attributes[key]) {
+    attributes[key].push(options.data);
+  } else if (options.append) {
+    attributes[key] = [options.data];
+  } else {
+    attributes[key] = options.data;
+  }
+}
+
+function getSlotValues(filledSlots) {
+  const slotValues = {};
+
+  console.log(`The filled slots: ${JSON.stringify(filledSlots)}`);
+  Object.keys(filledSlots).forEach((item) => {
+    const name = filledSlots[item].name;
+
+    if (filledSlots[item] &&
+      filledSlots[item].resolutions &&
+      filledSlots[item].resolutions.resolutionsPerAuthority[0] &&
+      filledSlots[item].resolutions.resolutionsPerAuthority[0].status &&
+      filledSlots[item].resolutions.resolutionsPerAuthority[0].status.code) {
+      switch (filledSlots[item].resolutions.resolutionsPerAuthority[0].status.code) {
+        case 'ER_SUCCESS_MATCH':
+          slotValues[name] = {
+            synonym: filledSlots[item].value,
+            resolved: filledSlots[item].resolutions.resolutionsPerAuthority[0].values[0].value.name,
+            isValidated: true,
+          };
+          break;
+        case 'ER_SUCCESS_NO_MATCH':
+          slotValues[name] = {
+            synonym: filledSlots[item].value,
+            resolved: filledSlots[item].value,
+            isValidated: false,
+          };
+          break;
+        default:
+          break;
+      }
+    } else {
+      slotValues[name] = {
+        synonym: filledSlots[item].value,
+        resolved: filledSlots[item].value,
+        isValidated: false,
+      };
+    }
+  }, this);
+
+  return slotValues;
+}
+
+function randomPhrase(array) {
+  return (array[Math.floor(Math.random() * array.length)]);
+}
+
+
+function buildPetMatchParams(slotValues) {
+  return [
+    ['SSET',
+      `canine-${slotValues.energy.resolved}-${slotValues.size.resolved}-${slotValues.temperament.resolved}`],
+  ];
+}
+
+function buildQueryString(params) {
+  let paramList = '';
+  params.forEach((paramGroup, index) => {
+    paramList += `${index === 0 ? '?' : '&'}${encodeURIComponent(paramGroup[0])}=${encodeURIComponent(paramGroup[1])}`;
+  });
+  return paramList;
+}
+
+function buildHttpGetOptions(host, path, port, params) {
+  return {
+    hostname: host,
+    path: path + buildQueryString(params),
+    port,
+    method: 'GET',
+  };
+}
+
+function buildPetMatchOptions(slotValues) {
+  const params = buildPetMatchParams(slotValues);
+  const port = 443;
+  return buildHttpGetOptions(petMatchApi.hostname, petMatchApi.pets, port, params);
+}
+
+
+function httpGet(options) {
+  return new Promise(((resolve, reject) => {
+    const request = https.request(options, (response) => {
+      response.setEncoding('utf8');
+      let returnData = '';
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return reject(new Error(`${response.statusCode}: ${response.req.getHeader('host')} ${response.req.path}`));
+      }
+
+      response.on('data', (chunk) => {
+        returnData += chunk;
+      });
+
+      response.on('end', () => {
+        resolve(JSON.parse(returnData));
+      });
+
+      response.on('error', (error) => {
+        reject(error);
+      });
+    });
+    request.end();
+  }));
+}
+
 
 const skillBuilder = Alexa.SkillBuilders.custom();
 
+/* LAMBDA SETUP */
 exports.handler = skillBuilder
   .addRequestHandlers(
-    GetNewFactHandler,
+    LaunchRequestHandler,
+    MythicalCreaturesHandler,
+    InProgressPetMatchIntent,
+    CompletedPetMatchIntent,
     HelpHandler,
-    ExitHandler,
     FallbackHandler,
+    ExitHandler,
     SessionEndedRequestHandler,
   )
-  .addRequestInterceptors(LocalizationInterceptor)
   .addErrorHandlers(ErrorHandler)
   .lambda();
-
-
-// translations
-const deData = {
-  translation: {
-    SKILL_NAME: 'Weltraumwissen',
-    GET_FACT_MESSAGE: 'Hier sind deine Fakten: ',
-    HELP_MESSAGE: 'Du kannst sagen, „Nenne mir einen Fakt über den Weltraum“, oder du kannst „Beenden“ sagen... Wie kann ich dir helfen?',
-    HELP_REPROMPT: 'Wie kann ich dir helfen?',
-    FALLBACK_MESSAGE: 'Die Weltraumfakten Skill kann dir dabei nicht helfen. Sie kann dir Fakten über den Raum erzählen, wenn du dannach fragst.',
-    FALLBACK_REPROMPT: 'Wie kann ich dir helfen?',
-    ERROR_MESSAGE: 'Es ist ein Fehler aufgetreten.',
-    STOP_MESSAGE: 'Auf Wiedersehen!',
-    FACTS:
-      [
-        'Ein Jahr dauert auf dem Merkur nur 88 Tage.',
-        'Die Venus ist zwar weiter von der Sonne entfernt, hat aber höhere Temperaturen als Merkur.',
-        'Venus dreht sich entgegen dem Uhrzeigersinn, möglicherweise aufgrund eines früheren Zusammenstoßes mit einem Asteroiden.',
-        'Auf dem Mars erscheint die Sonne nur halb so groß wie auf der Erde.',
-        'Jupiter hat den kürzesten Tag aller Planeten.',
-      ],
-  },
-};
-
-const dedeData = {
-  translation: {
-    SKILL_NAME: 'Weltraumwissen auf Deutsch',
-  },
-};
-
-// TODO: Replace this data with your own."**  This is the data for our skill.  You can see that it is a simple list of facts.
-
-// TODO: The items below this comment need your attention."** This is the beginning of the section where you need to customize several text strings for your skill.
-
-const enData = {
-  translation: {
-    SKILL_NAME: 'Space Facts',
-    GET_FACT_MESSAGE: 'Here\'s your fact: ',
-    HELP_MESSAGE: 'You can say tell me a space fact, or, you can say exit... What can I help you with?',
-    HELP_REPROMPT: 'What can I help you with?',
-    FALLBACK_MESSAGE: 'The Space Facts skill can\'t help you with that.  It can help you discover facts about space if you say tell me a space fact. What can I help you with?',
-    FALLBACK_REPROMPT: 'What can I help you with?',
-    ERROR_MESSAGE: 'Sorry, an error occurred.',
-    STOP_MESSAGE: 'Goodbye!',
-    FACTS:
-      [
-        'A year on Mercury is just 88 days long.',
-        'Despite being farther from the Sun, Venus experiences higher temperatures than Mercury.',
-        'On Mars, the Sun appears about half the size as it does on Earth.',
-        'Jupiter has the shortest day of all the planets.',
-        'The Sun is an almost perfect sphere.',
-      ],
-  },
-};
-
-const enauData = {
-  translation: {
-    SKILL_NAME: 'Austrailian Space Facts',
-  },
-};
-
-const encaData = {
-  translation: {
-    SKILL_NAME: 'Canadian Space Facts',
-  },
-};
-
-const engbData = {
-  translation: {
-    SKILL_NAME: 'British Space Facts',
-  },
-};
-
-const eninData = {
-  translation: {
-    SKILL_NAME: 'Indian Space Facts',
-  },
-};
-
-const enusData = {
-  translation: {
-    SKILL_NAME: 'American Space Facts',
-  },
-};
-
-const esData = {
-  translation: {
-    SKILL_NAME: 'Curiosidades del Espacio',
-    GET_FACT_MESSAGE: 'Aquí está tu curiosidad: ',
-    HELP_MESSAGE: 'Puedes decir dime una curiosidad del espacio o puedes decir salir... Cómo te puedo ayudar?',
-    HELP_REPROMPT: 'Como te puedo ayudar?',
-    FALLBACK_MESSAGE: 'La skill Curiosidades del Espacio no te puede ayudar con eso.  Te puede ayudar a descubrir curiosidades sobre el espacio si dices dime una curiosidad del espacio. Como te puedo ayudar?',
-    FALLBACK_REPROMPT: 'Como te puedo ayudar?',
-    ERROR_MESSAGE: 'Lo sentimos, se ha producido un error.',
-    STOP_MESSAGE: 'Adiós!',
-    FACTS:
-        [
-          'Un año en Mercurio es de solo 88 días',
-          'A pesar de estar más lejos del Sol, Venus tiene temperaturas más altas que Mercurio',
-          'En Marte el sol se ve la mitad de grande que en la Tierra',
-          'Jupiter tiene el día más corto de todos los planetas',
-          'El sol es una esféra casi perfecta',
-        ],
-  },
-};
-
-const esesData = {
-  translation: {
-    SKILL_NAME: 'Curiosidades del Espacio para España',
-  },
-};
-
-const esmxData = {
-  translation: {
-    SKILL_NAME: 'Curiosidades del Espacio para México',
-  },
-};
-
-const frData = {
-  translation: {
-    SKILL_NAME: 'Anecdotes de l\'Espace',
-    GET_FACT_MESSAGE: 'Voici votre anecdote : ',
-    HELP_MESSAGE: 'Vous pouvez dire donne-moi une anecdote, ou, vous pouvez dire stop... Comment puis-je vous aider?',
-    HELP_REPROMPT: 'Comment puis-je vous aider?',
-    FALLBACK_MESSAGE: 'La skill des anecdotes de l\'espace ne peux vous aider avec cela. Je peux vous aider à découvrir des anecdotes sur l\'espace si vous dites par exemple, donne-moi une anecdote. Comment puis-je vous aider?',
-    FALLBACK_REPROMPT: 'Comment puis-je vous aider?',
-    ERROR_MESSAGE: 'Désolé, une erreur est survenue.',
-    STOP_MESSAGE: 'Au revoir!',
-    FACTS:
-        [
-          'Une année sur Mercure ne dure que 88 jours.',
-          'En dépit de son éloignement du Soleil, Vénus connaît des températures plus élevées que sur Mercure.',
-          'Sur Mars, le Soleil apparaît environ deux fois plus petit que sur Terre.',
-          'De toutes les planètes, Jupiter a le jour le plus court.',
-          'Le Soleil est une sphère presque parfaite.',
-        ],
-  },
-};
-
-const frfrData = {
-  translation: {
-    SKILL_NAME: 'Anecdotes françaises de l\'espace',
-  },
-};
-
-const itData = {
-  translation: {
-    SKILL_NAME: 'Aneddoti dallo spazio',
-    GET_FACT_MESSAGE: 'Ecco il tuo aneddoto: ',
-    HELP_MESSAGE: 'Puoi chiedermi un aneddoto dallo spazio o puoi chiudermi dicendo "esci"... Come posso aiutarti?',
-    HELP_REPROMPT: 'Come posso aiutarti?',
-    FALLBACK_MESSAGE: 'Non posso aiutarti con questo. Posso aiutarti a scoprire fatti e aneddoti sullo spazio, basta che mi chiedi di dirti un aneddoto. Come posso aiutarti?',
-    FALLBACK_REPROMPT: 'Come posso aiutarti?',
-    ERROR_MESSAGE: 'Spiacenti, si è verificato un errore.',
-    STOP_MESSAGE: 'A presto!',
-    FACTS:
-      [
-        'Sul pianeta Mercurio, un anno dura solamente 88 giorni.',
-        'Pur essendo più lontana dal Sole, Venere ha temperature più alte di Mercurio.',
-        'Su Marte il sole appare grande la metà che su la terra. ',
-        'Tra tutti i pianeti del sistema solare, la giornata più corta è su Giove.',
-        'Il Sole è quasi una sfera perfetta.',
-      ],
-  },
-};
-
-const ititData = {
-  translation: {
-    SKILL_NAME: 'Aneddoti dallo spazio',
-  },
-};
-
-const jpData = {
-  translation: {
-    SKILL_NAME: '日本語版豆知識',
-    GET_FACT_MESSAGE: '知ってましたか？',
-    HELP_MESSAGE: '豆知識を聞きたい時は「豆知識」と、終わりたい時は「おしまい」と言ってください。どうしますか？',
-    HELP_REPROMPT: 'どうしますか？',
-    ERROR_MESSAGE: '申し訳ありませんが、エラーが発生しました',
-    STOP_MESSAGE: 'さようなら',
-    FACTS:
-      [
-        '水星の一年はたった88日です。',
-        '金星は水星と比べて太陽より遠くにありますが、気温は水星よりも高いです。',
-        '金星は反時計回りに自転しています。過去に起こった隕石の衝突が原因と言われています。',
-        '火星上から見ると、太陽の大きさは地球から見た場合の約半分に見えます。',
-        '木星の<sub alias="いちにち">1日</sub>は全惑星の中で一番短いです。',
-        '天の川銀河は約50億年後にアンドロメダ星雲と衝突します。',
-      ],
-  },
-};
-
-const jpjpData = {
-  translation: {
-    SKILL_NAME: '日本語版豆知識',
-  },
-};
-
-const ptData = {
-  translation: {
-    SKILL_NAME: 'Fatos Espaciais',
-    GET_FACT_MESSAGE: 'Aqui vai: ',
-    HELP_MESSAGE: 'Você pode me perguntar por um fato interessante sobre o espaço, ou, fexar a skill. Como posso ajudar?',
-    HELP_REPROMPT: 'O que vai ser?',
-    FALLBACK_MESSAGE: 'A skill fatos espaciais não tem uma resposta para isso. Ela pode contar informações interessantes sobre o espaço, é só perguntar. Como posso ajudar?',
-    FALLBACK_REPROMPT: 'Eu posso contar fatos sobre o espaço. Como posso ajudar?',
-    ERROR_MESSAGE: 'Desculpa, algo deu errado.',
-    STOP_MESSAGE: 'Tchau!',
-    FACTS:
-      [
-        'Um ano em Mercúrio só dura 88 dias.',
-        'Apesar de ser mais distante do sol, Venus é mais quente que Mercúrio.',
-        'Visto de marte, o sol parece ser metade to tamanho que nós vemos da terra.',
-        'Júpiter tem os dias mais curtos entre os planetas no nosso sistema solar.',
-        'O sol é quase uma esfera perfeita.',
-      ],
-  },
-};
-
-// constructs i18n and l10n data structure
-// translations for this sample can be found at the end of this file
-const languageStrings = {
-  'de': deData,
-  'de-DE': dedeData,
-  'en': enData,
-  'en-AU': enauData,
-  'en-CA': encaData,
-  'en-GB': engbData,
-  'en-IN': eninData,
-  'en-US': enusData,
-  'es': esData,
-  'es-ES': esesData,
-  'es-MX': esmxData,
-  'fr': frData,
-  'fr-FR': frfrData,
-  'it': itData,
-  'it-IT': ititData,
-  'ja': jpData,
-  'ja-JP': jpjpData,
-  'pt': ptData,
-  'pt-BR': ptData
-};
